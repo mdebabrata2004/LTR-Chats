@@ -1,8 +1,18 @@
-# Nexus Chat
+# LTR Chat
+
+<p align="center">
+  <img src="public/icons/ltr_logo.png" alt="Nexus Chat Logo" width="120">
+</p>
+
+<h1 align="center">LTR Chat</h1>
+
+<p align="center">
+  A modern, premium messaging web application built with HTML, CSS, Vanilla JavaScript, and Firebase.
+</p>
 
 A modern, premium messaging web application built with HTML, CSS, Vanilla JavaScript, and Firebase.
 
-**Nexus** is an original product identity. It is not a clone of WhatsApp or Telegram.
+**LTR Chat** is an original product identity. It is not a clone of WhatsApp or Telegram.
 
 ## Features (v1)
 
