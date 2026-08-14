@@ -1,0 +1,49 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Profile pictures — owner can write, anyone authenticated can read
+    // (public profile photos; privacy of *who* sees them is enforced at profile level)
+    match /users/{uid}/profile/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(uid)
+                   && request.resource.size < 5 * 1024 * 1024 // 5 MB
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Conversation media (images, videos, files, voice)
+    // Path: conversations/{cid}/{uploaderUid}/{fileName}
+    // Only members of the conversation should be able to read.
+    // Membership check is limited in Storage rules; we rely on:
+    // 1. Clients only generate download URLs for members
+    // 2. Cloud Function or additional metadata for stricter enforcement later
+    // For v1 we require authentication + path ownership for write.
+    match /conversations/{cid}/{uploaderUid}/{fileName} {
+      allow read: if isSignedIn(); // tighten later with custom claims or Cloud Function signed URLs
+      allow write: if isSignedIn()
+                   && request.auth.uid == uploaderUid
+                   && request.resource.size < 50 * 1024 * 1024; // 50 MB limit
+    }
+
+    // Group avatars
+    match /groups/{groupId}/avatar/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

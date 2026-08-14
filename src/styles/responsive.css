@@ -1,0 +1,56 @@
+/* Mobile first — Desktop enhancement */
+
+@media (min-width: 768px) {
+  .tab-bar {
+    display: none;
+  }
+
+  .sidebar {
+    display: flex;
+  }
+
+  /*
+  .app-shell {
+    max-width: 1400px;
+    margin: 0 auto;
+    width: 100%;
+    border-left: 1px solid var(--border-subtle);
+    border-right: 1px solid var(--border-subtle);
+  }*/
+
+  /* On desktop, chat list can live in main until dual-pane is wired */
+  .main-content {
+    background: var(--surface-0);
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --sidebar-width: 380px;
+  }
+}
+
+@media (max-width: 767px) {
+  .desktop-only {
+    display: none !important;
+  }
+}
+
+/* Composer safe above keyboard */
+.composer-bar {
+  padding-bottom: max(var(--space-2), var(--safe-bottom));
+  background: var(--surface-1);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  z-index: 20;
+}
+
+input, textarea, select {
+  font-size: 16px;
+}
+
+@media (min-width: 768px) {
+  input, textarea, select {
+    font-size: var(--text-base);
+  }
+}

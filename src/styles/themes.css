@@ -1,0 +1,87 @@
+/* ============================================================
+   Nexus Chat — Themes (Light / Dark)
+   Designed intentionally, not inverted.
+   ============================================================ */
+
+/* Light is the default (defined in variables.css) */
+
+/* ---------- Dark Theme ---------- */
+[data-theme="dark"] {
+  --color-accent: #7b8aff;
+  --color-accent-hover: #6a79f0;
+  --color-accent-muted: rgba(123, 138, 255, 0.15);
+  --color-accent-text: #0f1117;
+
+  --surface-0: #0f1117;
+  --surface-1: #161922;
+  --surface-2: #1c1f2b;
+  --surface-3: #252936;
+  --surface-inverse: #f8f9fc;
+
+  --text-primary: #f1f3f9;
+  --text-secondary: #a0a6b5;
+  --text-tertiary: #6b7280;
+  --text-inverse: #0f1117;
+  --text-accent: var(--color-accent);
+
+  --border-subtle: rgba(255, 255, 255, 0.05);
+  --border-default: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  --bubble-out: #5b6af0;
+  --bubble-out-text: #ffffff;
+  --bubble-in: #1c1f2b;
+  --bubble-in-text: #f1f3f9;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
+  --shadow-xl: 0 24px 48px rgba(0, 0, 0, 0.5);
+}
+
+/* System preference fallback when no explicit data-theme */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-accent: #7b8aff;
+    --color-accent-hover: #6a79f0;
+    --color-accent-muted: rgba(123, 138, 255, 0.15);
+    --color-accent-text: #0f1117;
+
+    --surface-0: #0f1117;
+    --surface-1: #161922;
+    --surface-2: #1c1f2b;
+    --surface-3: #252936;
+    --surface-inverse: #f8f9fc;
+
+    --text-primary: #f1f3f9;
+    --text-secondary: #a0a6b5;
+    --text-tertiary: #6b7280;
+    --text-inverse: #0f1117;
+    --text-accent: var(--color-accent);
+
+    --border-subtle: rgba(255, 255, 255, 0.05);
+    --border-default: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.14);
+
+    --bubble-out: #5b6af0;
+    --bubble-out-text: #ffffff;
+    --bubble-in: #1c1f2b;
+    --bubble-in-text: #f1f3f9;
+
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
+    --shadow-xl: 0 24px 48px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+    --duration-slow: 0ms;
+  }
+}
