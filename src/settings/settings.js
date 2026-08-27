@@ -1,8 +1,9 @@
 /**
  * Settings — Telegram-style hub
- * Modules: appearance · notifications · privacy · security · device
- * Firestore: users + userSettings
- * Storage: users/{uid}/profile/avatar
+ *
+ * Modules:  appearance · notifications · privacy · security · device
+ * Components: avatar · modal · loader · input · button
+ * Firebase: users · userSettings · Storage avatar · usernames txn
  */
 
 import { db, auth, storage } from "../config/firebase.js";
@@ -11,26 +12,43 @@ import { signOut, loadUserData } from "../auth/auth.js";
 import { navigate } from "../core/router.js";
 import { showToast } from "../components/toast.js";
 
+/* ── UI components ─────────────────────────────────────────── */
+import {
+  avatarHtml,
+  updateAvatar,
+  ensureAvatarStyles,
+} from "../components/avatar.js";
+import { confirmDialog } from "../components/modal.js";
+import { setButtonLoading as setBtnLoading } from "../components/loader.js";
+import {
+  textFieldHtml,
+  textareaFieldHtml,
+  bindCharCounter,
+  bindNormalize,
+  getFieldValue,
+  setFieldError,
+  clearFieldError,
+  ensureInputStyles,
+} from "../components/input.js";
+import { ensureButtonStyles } from "../components/button.js";
+
+/* ── Settings sub-modules ──────────────────────────────────── */
 import {
   appearanceSectionHtml,
   bindAppearanceControls,
 } from "./appearance.js";
-
 import {
   notificationsSectionHtml,
   bindNotificationControls,
 } from "./notifications.js";
-
 import {
   privacySectionHtml,
   bindPrivacyControls,
 } from "./privacy.js";
-
 import {
   securitySectionHtml,
   bindSecurityControls,
 } from "./security.js";
-
 import {
   registerCurrentDevice,
   listDevices,
@@ -41,10 +59,13 @@ import {
 
 const FieldValue = firebase.firestore.FieldValue;
 
+/* ── Module-level listener handles (cleanup on leave) ──────── */
 let unsubSettings = null;
 let unsubProfile = null;
 
-/* ─────────────────────────── helpers ─────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   HELPERS — escape, username, profile save, avatar upload
+═══════════════════════════════════════════════════════════ */
 
 function escapeHtml(s) {
   return String(s || "")
@@ -67,6 +88,10 @@ function isValidUsername(u) {
   return /^[a-z0-9_]{3,32}$/.test(u);
 }
 
+/**
+ * Public profile write.
+ * Username changes go through atomic usernames/ transaction.
+ */
 async function saveProfile({ displayName, bio, photoURL, username }) {
   const me = auth.currentUser;
   if (!me) throw new Error("Not authenticated");
@@ -82,7 +107,9 @@ async function saveProfile({ displayName, bio, photoURL, username }) {
 
   if (nextUsername && nextUsername !== oldUsername) {
     const newRef = db.collection("usernames").doc(nextUsername);
-    const oldRef = oldUsername ? db.collection("usernames").doc(oldUsername) : null;
+    const oldRef = oldUsername
+      ? db.collection("usernames").doc(oldUsername)
+      : null;
 
     await db.runTransaction(async (tx) => {
       const taken = await tx.get(newRef);
@@ -126,11 +153,16 @@ async function saveProfile({ displayName, bio, photoURL, username }) {
   await loadUserData(me.uid);
 }
 
+/** Storage path: users/{uid}/profile/avatar.* */
 async function uploadAvatar(file) {
   const me = auth.currentUser;
   if (!me) throw new Error("Not authenticated");
-  if (!file.type?.startsWith("image/")) throw new Error("Please choose an image file");
-  if (file.size > 5 * 1024 * 1024) throw new Error("Image must be under 5 MB");
+  if (!file.type?.startsWith("image/")) {
+    throw new Error("Please choose an image file");
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    throw new Error("Image must be under 5 MB");
+  }
 
   const ext = (file.name.split(".").pop() || "jpg").toLowerCase().slice(0, 5);
   const path = `users/${me.uid}/profile/avatar.${ext}`;
@@ -139,87 +171,180 @@ async function uploadAvatar(file) {
   return ref.getDownloadURL();
 }
 
-function setButtonLoading(btn, loadingText = "Saving…") {
-  if (!btn) return () => {};
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = loadingText;
-  return () => {
-    btn.disabled = false;
-    btn.textContent = original;
-  };
-}
+/* ═══════════════════════════════════════════════════════════
+   STYLES — Telegram-like settings chrome
+═══════════════════════════════════════════════════════════ */
 
 function ensureStyles() {
+  ensureAvatarStyles();
+  ensureInputStyles();
+  ensureButtonStyles();
+
   if (document.getElementById("settings-styles")) return;
+
   const style = document.createElement("style");
   style.id = "settings-styles";
   style.textContent = `
-    .settings-scroll { background: var(--surface-0); flex: 1; min-height: 0; }
-    .tg-profile-card {
-      display: flex; flex-direction: column; align-items: center;
-      padding: 28px 16px 18px; gap: 6px;
+    .settings-scroll {
+      background: var(--surface-0);
+      flex: 1;
+      min-height: 0;
     }
+
+    /* Profile card */
+    .tg-profile-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 28px 16px 18px;
+      gap: 6px;
+    }
+    .tg-profile-name {
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .tg-profile-status {
+      font-size: 0.85rem;
+      color: var(--color-success, #4caf50);
+    }
+    .tg-profile-bio {
+      max-width: 280px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    /* XL avatar fallback (when not using nx-avatar) */
     .avatar--xl {
-      width: 100px; height: 100px; border-radius: 50%;
-      font-size: 2.1rem; display: flex; align-items: center; justify-content: center;
-      background: var(--surface-2); overflow: hidden;
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      font-size: 2.1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-2);
+      overflow: hidden;
       box-shadow: 0 4px 20px rgba(0,0,0,0.25);
     }
-    .avatar--xl img, .avatar--md img { width: 100%; height: 100%; object-fit: cover; }
-    .avatar--md {
-      width: 64px; height: 64px; border-radius: 50%; flex-shrink: 0;
-      font-size: 1.3rem; display: flex; align-items: center; justify-content: center;
-      background: var(--surface-2); overflow: hidden;
+    .avatar--xl img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
     }
-    .tg-profile-name { font-size: 1.4rem; font-weight: 600; color: var(--text-primary); }
-    .tg-profile-status { font-size: 0.85rem; color: var(--color-success, #4caf50); }
-    .tg-profile-bio {
-      max-width: 280px; text-align: center; font-size: 13px;
-      color: var(--text-secondary); margin-top: 4px; line-height: 1.4;
-    }
+
+    /* Sections / rows */
     .tg-section {
-      margin: 8px 12px 12px; background: var(--surface-1);
-      border-radius: 14px; overflow: hidden;
+      margin: 8px 12px 12px;
+      background: var(--surface-1);
+      border-radius: 14px;
+      overflow: hidden;
       border: 1px solid var(--border-subtle);
     }
     .tg-section__label {
-      padding: 12px 16px 6px; font-size: 12px; font-weight: 600;
-      color: var(--color-accent); text-transform: uppercase; letter-spacing: 0.03em;
+      padding: 12px 16px 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-accent);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
     }
     .tg-row {
-      display: flex; align-items: center; gap: 14px;
-      padding: 12px 16px; min-height: 52px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 16px;
+      min-height: 52px;
       border-top: 1px solid var(--border-subtle);
     }
     .tg-section .tg-row:first-of-type { border-top: none; }
-    .tg-row__icon { font-size: 1.15rem; color: var(--color-accent); width: 24px; text-align: center; flex-shrink: 0; }
+    .tg-row__icon {
+      font-size: 1.15rem;
+      color: var(--color-accent);
+      width: 24px;
+      text-align: center;
+      flex-shrink: 0;
+    }
     .tg-row__body { flex: 1; min-width: 0; }
     .tg-row__title { font-size: 15px; color: var(--text-primary); }
-    .tg-row__sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    .tg-row__sub {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
     .tg-row__value { font-size: 13px; color: var(--text-secondary); }
     .tg-row__chevron { color: var(--text-tertiary); font-size: 0.9rem; }
     .tg-row--btn {
-      width: 100%; border: none; background: transparent;
-      cursor: pointer; text-align: left; font: inherit; color: inherit;
+      width: 100%;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      color: inherit;
     }
-    .tg-row--btn:hover, .tg-row--btn:active { background: var(--surface-2); }
+    .tg-row--btn:hover,
+    .tg-row--btn:active { background: var(--surface-2); }
     .tg-row--danger .tg-row__title,
-    .tg-row--danger .tg-row__icon { color: var(--color-danger, #e53935); }
+    .tg-row--danger .tg-row__icon {
+      color: var(--color-danger, #e53935);
+    }
     .tg-row--toggle input[type="checkbox"] {
-      width: 42px; height: 24px; accent-color: var(--color-accent);
-      cursor: pointer; flex-shrink: 0;
+      width: 42px;
+      height: 24px;
+      accent-color: var(--color-accent);
+      cursor: pointer;
+      flex-shrink: 0;
     }
     .tg-select {
-      max-width: 140px; height: 34px; border-radius: 8px;
-      border: 1px solid var(--border-default); background: var(--surface-2);
-      color: var(--text-primary); font-size: 13px; padding: 0 8px; cursor: pointer;
+      max-width: 140px;
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid var(--border-default);
+      background: var(--surface-2);
+      color: var(--text-primary);
+      font-size: 13px;
+      padding: 0 8px;
+      cursor: pointer;
     }
+
+    /* Theme chips (appearance module may also style) */
+    .theme-chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 12px 14px;
+    }
+    .theme-chip {
+      flex: 1;
+      min-width: 88px;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border-default);
+      background: var(--surface-2);
+      color: var(--text-secondary);
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .theme-chip.active {
+      border-color: var(--color-accent);
+      color: var(--color-accent);
+      background: var(--color-accent-muted);
+    }
+
+    /* Legacy edit overlay (profile sheet) */
     .settings-overlay {
-      position: fixed; inset: 0; z-index: 600;
+      position: fixed;
+      inset: 0;
+      z-index: 600;
       background: rgba(0,0,0,0.5);
       display: none;
-      align-items: flex-end; justify-content: center;
+      align-items: flex-end;
+      justify-content: center;
       backdrop-filter: blur(2px);
     }
     .settings-overlay.is-open { display: flex; }
@@ -227,87 +352,126 @@ function ensureStyles() {
       .settings-overlay { align-items: center; }
     }
     .settings-sheet {
-      width: 100%; max-width: 420px; background: var(--surface-1);
-      border-radius: 16px 16px 0 0; max-height: 90vh; overflow: auto;
-      animation: sheet-up 0.2s ease-out;
+      width: 100%;
+      max-width: 420px;
+      background: var(--surface-1);
+      border-radius: 16px 16px 0 0;
+      max-height: 90vh;
+      overflow: auto;
+      animation: settings-sheet-up 0.2s ease-out;
     }
     @media (min-width: 600px) {
       .settings-sheet { border-radius: 16px; }
     }
-    @keyframes sheet-up {
+    @keyframes settings-sheet-up {
       from { transform: translateY(16px); opacity: 0.6; }
       to { transform: translateY(0); opacity: 1; }
     }
     .settings-sheet__head {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 12px 16px; border-bottom: 1px solid var(--border-subtle);
-      position: sticky; top: 0; background: var(--surface-1); z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      position: sticky;
+      top: 0;
+      background: var(--surface-1);
+      z-index: 1;
     }
     .settings-sheet__body {
-      padding: 16px; display: flex; flex-direction: column; gap: 16px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
     }
-    .settings-dialog {
-      background: var(--surface-1); border-radius: 16px; padding: 24px;
-      width: min(360px, 92vw); text-align: center;
-      box-shadow: 0 16px 48px rgba(0,0,0,0.35);
+    .avatar-edit-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
-    .settings-dialog h3 { margin: 0 0 8px; color: var(--text-primary); }
-    .settings-dialog p { margin: 0 0 20px; color: var(--text-secondary); font-size: 14px; line-height: 1.45; }
-    .settings-dialog__actions { display: flex; gap: 10px; justify-content: center; }
-    .btn--danger {
-      background: var(--color-danger, #e53935); color: #fff; border: none;
-      padding: 10px 18px; border-radius: 10px; font-weight: 600; cursor: pointer;
+    .avatar-edit-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
     }
-    .btn--sm { padding: 6px 14px; font-size: 14px; }
-    .field { display: flex; flex-direction: column; gap: 6px; }
-    .field__label {
-      font-size: 12px; font-weight: 600; color: var(--text-secondary);
-      text-transform: uppercase; letter-spacing: 0.04em;
+    .avatar--md {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      font-size: 1.3rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--surface-2);
+      overflow: hidden;
     }
-    .field__label-row { display: flex; justify-content: space-between; align-items: center; }
-    .field__counter { font-size: 11px; color: var(--text-tertiary); }
-    .field__input, .field__textarea {
-      width: 100%; padding: 10px 12px; border-radius: 10px; font-size: 15px;
-      border: 1px solid var(--border-default); background: var(--surface-2);
-      color: var(--text-primary); box-sizing: border-box; font-family: inherit;
-    }
-    .field__textarea { resize: vertical; min-height: 72px; }
-    .field__input:focus, .field__textarea:focus {
-      outline: 2px solid var(--color-accent); border-color: transparent;
-    }
-    .field__input-wrap {
-      display: flex; align-items: center;
-      border: 1px solid var(--border-default); border-radius: 10px;
-      background: var(--surface-2); overflow: hidden;
-    }
-    .field__input-wrap:focus-within { outline: 2px solid var(--color-accent); }
-    .field__prefix { padding: 0 0 0 12px; color: var(--text-secondary); font-size: 15px; }
-    .field__input--prefixed {
-      border: none; background: transparent; outline: none;
-      padding: 10px 12px 10px 4px; flex: 1; color: var(--text-primary); font-size: 15px;
-    }
-    .avatar-edit-row { display: flex; align-items: center; gap: 12px; }
-    .avatar-edit-actions { display: flex; flex-direction: column; gap: 8px; flex: 1; }
-    .theme-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-    .theme-chip {
-      flex: 1; min-width: 88px; padding: 12px; border-radius: 10px;
-      border: 1px solid var(--border-default); background: var(--surface-2);
-      color: var(--text-secondary); font-weight: 600; font-size: 13px; cursor: pointer;
-    }
-    .theme-chip.active {
-      border-color: var(--color-accent); color: var(--color-accent);
-      background: var(--color-accent-muted);
+    .avatar--md img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
     }
   `;
   document.head.appendChild(style);
 }
 
-/* ─────────────────────────── renderer ────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   DOM helpers — overlay open/close, profile card paint
+═══════════════════════════════════════════════════════════ */
+
+function openOverlay(el) {
+  if (!el) return;
+  el.hidden = false;
+  el.classList.add("is-open");
+}
+
+function closeOverlay(el) {
+  if (!el) return;
+  el.hidden = true;
+  el.classList.remove("is-open");
+}
+
+function paintProfileCard(root, data) {
+  const name = data.displayName || "User";
+  const username = data.username || "";
+  const bio = data.bio || "";
+  const photo = data.photoURL || "";
+
+  const nameEl = root.querySelector("#settings-name");
+  const userEl = root.querySelector("#settings-username");
+  const bioEl = root.querySelector("#settings-bio");
+
+  if (nameEl) nameEl.textContent = name;
+  if (userEl) userEl.textContent = username ? `@${username}` : "—";
+
+  if (bioEl) {
+    if (bio) {
+      bioEl.hidden = false;
+      bioEl.textContent = bio;
+    } else {
+      bioEl.hidden = true;
+      bioEl.textContent = "";
+    }
+  }
+
+  updateAvatar("settings-avatar", {
+    name,
+    photoURL: photo,
+    uid: auth.currentUser?.uid || name,
+    size: "xl",
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   RENDER — main settings page
+═══════════════════════════════════════════════════════════ */
 
 export function renderSettings() {
   const root = document.getElementById("page-root");
   if (!root) return () => {};
 
+  /* Clear previous listeners if remounting */
   if (unsubSettings) {
     unsubSettings();
     unsubSettings = null;
@@ -328,8 +492,9 @@ export function renderSettings() {
   const phone = privateProfile?.phone || "";
   const email = privateProfile?.email || auth.currentUser?.email || "";
   const photo = profile?.photoURL || "";
+  const uid = auth.currentUser?.uid || "me";
 
-  // Devices load async — placeholder first
+  /* ── Page structure ── */
   root.innerHTML = `
     <header class="app-header">
       ${
@@ -343,15 +508,17 @@ export function renderSettings() {
     </header>
 
     <div class="page__scroll settings-scroll">
-      <!-- Profile -->
+
+      <!-- ══ PROFILE CARD ══ -->
       <div class="tg-profile-card">
-        <div class="avatar avatar--xl" id="settings-avatar">
-          ${
-            photo
-              ? `<img src="${escapeHtml(photo)}" alt="Avatar">`
-              : `<span>${(name[0] || "U").toUpperCase()}</span>`
-          }
-        </div>
+        ${avatarHtml({
+          id: "settings-avatar",
+          name,
+          photoURL: photo,
+          uid,
+          size: "xl",
+          className: "avatar--xl",
+        })}
         <div class="tg-profile-name" id="settings-name">${escapeHtml(name)}</div>
         <div class="tg-profile-status" id="settings-online">online</div>
         ${
@@ -361,7 +528,7 @@ export function renderSettings() {
         }
       </div>
 
-      <!-- Identity -->
+      <!-- ══ IDENTITY ══ -->
       <div class="tg-section">
         ${
           phone
@@ -388,7 +555,9 @@ export function renderSettings() {
         <div class="tg-row">
           <i class="bi bi-at tg-row__icon"></i>
           <div class="tg-row__body">
-            <div class="tg-row__title" id="settings-username">${username ? "@" + escapeHtml(username) : "—"}</div>
+            <div class="tg-row__title" id="settings-username">${
+              username ? "@" + escapeHtml(username) : "—"
+            }</div>
             <div class="tg-row__sub">Username</div>
           </div>
         </div>
@@ -402,19 +571,13 @@ export function renderSettings() {
         </button>
       </div>
 
-      <!-- Notifications module -->
+      <!-- ══ MODULE SECTIONS ══ -->
       ${notificationsSectionHtml()}
-
-      <!-- Privacy module -->
       ${privacySectionHtml()}
-
-      <!-- Appearance module -->
       ${appearanceSectionHtml()}
-
-      <!-- Security module (includes password overlay markup) -->
       ${securitySectionHtml()}
 
-      <!-- Devices (filled async) -->
+      <!-- ══ DEVICES (async fill) ══ -->
       <div id="devices-section-host">
         <div class="tg-section">
           <div class="tg-section__label">Devices</div>
@@ -426,32 +589,39 @@ export function renderSettings() {
         </div>
       </div>
 
-      <!-- General -->
+      <!-- ══ GENERAL ══ -->
       <div class="tg-section">
         <div class="tg-section__label">General</div>
         <button type="button" class="tg-row tg-row--btn" id="btn-data">
           <i class="bi bi-database tg-row__icon"></i>
-          <div class="tg-row__body"><div class="tg-row__title">Data and Storage</div></div>
+          <div class="tg-row__body">
+            <div class="tg-row__title">Data and Storage</div>
+          </div>
           <i class="bi bi-chevron-right tg-row__chevron"></i>
         </button>
         <button type="button" class="tg-row tg-row--btn" id="btn-about">
           <i class="bi bi-info-circle tg-row__icon"></i>
-          <div class="tg-row__body"><div class="tg-row__title">About Nexus</div></div>
+          <div class="tg-row__body">
+            <div class="tg-row__title">About Nexus</div>
+          </div>
           <span class="tg-row__value">v1.0</span>
         </button>
       </div>
 
-      <!-- Logout -->
+      <!-- ══ LOGOUT ══ -->
       <div class="tg-section">
         <button type="button" class="tg-row tg-row--btn tg-row--danger" id="btn-logout">
           <i class="bi bi-box-arrow-right tg-row__icon"></i>
-          <div class="tg-row__body"><div class="tg-row__title">Log out</div></div>
+          <div class="tg-row__body">
+            <div class="tg-row__title">Log out</div>
+          </div>
         </button>
       </div>
+
       <div style="height:28px"></div>
     </div>
 
-    <!-- Edit profile overlay -->
+    <!-- ══ EDIT PROFILE SHEET ══ -->
     <div id="edit-overlay" class="settings-overlay" hidden>
       <div class="settings-sheet" role="dialog" aria-modal="true" aria-label="Edit profile">
         <div class="settings-sheet__head">
@@ -460,79 +630,69 @@ export function renderSettings() {
           <button type="button" class="btn btn--primary btn--sm" id="edit-save">Save</button>
         </div>
         <div class="settings-sheet__body">
-          <div class="field">
-            <label class="field__label">Profile photo</label>
-            <div class="avatar-edit-row">
-              <div class="avatar avatar--md" id="edit-avatar-preview">
-                ${
-                  photo
-                    ? `<img src="${escapeHtml(photo)}" alt="">`
-                    : `<span>${(name[0] || "U").toUpperCase()}</span>`
-                }
-              </div>
-              <div class="avatar-edit-actions">
-                <button type="button" class="btn btn--secondary btn--sm" id="btn-pick-photo">
-                  <i class="bi bi-upload"></i> Upload photo
-                </button>
-                <input type="file" id="avatar-file-input" accept="image/*" hidden />
-                <input class="field__input" id="edit-photo" placeholder="…or paste image URL" value="${escapeHtml(photo)}" />
-              </div>
+          <div class="avatar-edit-row">
+            <div class="avatar avatar--md" id="edit-avatar-preview">
+              ${
+                photo
+                  ? `<img src="${escapeHtml(photo)}" alt="">`
+                  : `<span>${(name[0] || "U").toUpperCase()}</span>`
+              }
+            </div>
+            <div class="avatar-edit-actions">
+              <button type="button" class="btn btn--secondary btn--sm" id="btn-pick-photo">
+                <i class="bi bi-upload"></i> Upload photo
+              </button>
+              <input type="file" id="avatar-file-input" accept="image/*" hidden />
             </div>
           </div>
-          <div class="field">
-            <label class="field__label">Display name</label>
-            <input class="field__input" id="edit-name" maxlength="40" value="${escapeHtml(name)}" />
-          </div>
-          <div class="field">
-            <label class="field__label">Username</label>
-            <div class="field__input-wrap">
-              <span class="field__prefix">@</span>
-              <input class="field__input field__input--prefixed" id="edit-username"
-                     maxlength="32" placeholder="your_username" value="${escapeHtml(username)}" />
-            </div>
-          </div>
-          <div class="field">
-            <div class="field__label-row">
-              <label class="field__label">Bio</label>
-              <span class="field__counter" id="bio-counter">${bio.length}/160</span>
-            </div>
-            <textarea class="field__textarea" id="edit-bio" maxlength="160" rows="3">${escapeHtml(bio)}</textarea>
-          </div>
-        </div>
-      </div>
-    </div>
 
-    <!-- Logout confirm -->
-    <div id="logout-overlay" class="settings-overlay" hidden>
-      <div class="settings-dialog" role="alertdialog" aria-modal="true">
-        <h3>Log out?</h3>
-        <p>You will need to sign in again to use Nexus on this device.</p>
-        <div class="settings-dialog__actions">
-          <button type="button" class="btn btn--secondary" id="logout-cancel">Cancel</button>
-          <button type="button" class="btn btn--danger" id="logout-confirm">Log out</button>
+          ${textFieldHtml({
+            id: "edit-name",
+            label: "Display name",
+            value: name,
+            maxlength: 40,
+            placeholder: "Your name",
+          })}
+
+          ${textFieldHtml({
+            id: "edit-username",
+            label: "Username",
+            value: username,
+            maxlength: 32,
+            prefix: "@",
+            placeholder: "your_username",
+            hint: "3–32 characters · letters, numbers, underscore",
+          })}
+
+          ${textareaFieldHtml({
+            id: "edit-bio",
+            label: "Bio",
+            value: bio,
+            maxlength: 160,
+            rows: 3,
+            placeholder: "A short introduction",
+          })}
+
+          ${textFieldHtml({
+            id: "edit-photo",
+            label: "Or image URL",
+            value: photo,
+            placeholder: "https://…",
+          })}
         </div>
       </div>
     </div>
   `;
 
-  const editOverlay = root.querySelector("#edit-overlay");
-  const logoutOverlay = root.querySelector("#logout-overlay");
+  /* ═══════════════════════════════════════════════════════════
+     EVENT BINDINGS
+  ═══════════════════════════════════════════════════════════ */
 
-  function openOverlay(el) {
-    if (!el) return;
-    el.hidden = false;
-    el.classList.add("is-open");
-  }
-  function closeOverlay(el) {
-    if (!el) return;
-    el.hidden = true;
-    el.classList.remove("is-open");
-  }
+  const editOverlay = root.querySelector("#edit-overlay");
 
   const onKeyDown = (e) => {
     if (e.key !== "Escape") return;
     closeOverlay(editOverlay);
-    closeOverlay(logoutOverlay);
     const pw = root.querySelector("#password-overlay");
     if (pw) {
       pw.hidden = true;
@@ -544,13 +704,12 @@ export function renderSettings() {
   editOverlay?.addEventListener("click", (e) => {
     if (e.target === editOverlay) closeOverlay(editOverlay);
   });
-  logoutOverlay?.addEventListener("click", (e) => {
-    if (e.target === logoutOverlay) closeOverlay(logoutOverlay);
+
+  root.querySelector("#btn-settings-back")?.addEventListener("click", () => {
+    navigate("chats");
   });
 
-  root.querySelector("#btn-settings-back")?.addEventListener("click", () => navigate("chats"));
-
-  /* ── Module binders ── */
+  /* ── Sub-module binders ── */
   bindNotificationControls(root);
   bindPrivacyControls(root);
   bindAppearanceControls(root);
@@ -579,34 +738,29 @@ export function renderSettings() {
     }
   })();
 
-  /* ── Edit profile ── */
+  /* ── Edit profile form ── */
   let pendingAvatarFile = null;
   const fileInput = root.querySelector("#avatar-file-input");
   const avatarPreview = root.querySelector("#edit-avatar-preview");
 
-  root.querySelector("#btn-edit-profile")?.addEventListener("click", () => openOverlay(editOverlay));
+  bindCharCounter("edit-bio");
+  bindNormalize(root.querySelector("#edit-username"), normalizeUsername);
+
+  root.querySelector("#btn-edit-profile")?.addEventListener("click", () => {
+    openOverlay(editOverlay);
+  });
+
   root.querySelector("#edit-cancel")?.addEventListener("click", () => {
     pendingAvatarFile = null;
+    clearFieldError("edit-name");
+    clearFieldError("edit-username");
     closeOverlay(editOverlay);
   });
 
-  const bioTextarea = root.querySelector("#edit-bio");
-  const bioCounter = root.querySelector("#bio-counter");
-  bioTextarea?.addEventListener("input", () => {
-    if (bioCounter) bioCounter.textContent = `${bioTextarea.value.length}/160`;
+  root.querySelector("#btn-pick-photo")?.addEventListener("click", () => {
+    fileInput?.click();
   });
 
-  const usernameInput = root.querySelector("#edit-username");
-  usernameInput?.addEventListener("input", () => {
-    const pos = usernameInput.selectionStart;
-    const n = normalizeUsername(usernameInput.value);
-    if (usernameInput.value !== n) {
-      usernameInput.value = n;
-      usernameInput.setSelectionRange(Math.max(0, pos - 1), Math.max(0, pos - 1));
-    }
-  });
-
-  root.querySelector("#btn-pick-photo")?.addEventListener("click", () => fileInput?.click());
   fileInput?.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file) return;
@@ -632,83 +786,80 @@ export function renderSettings() {
   });
 
   root.querySelector("#edit-save")?.addEventListener("click", async () => {
-    const displayName = root.querySelector("#edit-name")?.value.trim() || "";
-    const bioVal = root.querySelector("#edit-bio")?.value.trim().slice(0, 160) || "";
-    const photoUrlVal = root.querySelector("#edit-photo")?.value.trim() || "";
-    const usernameVal = normalizeUsername(root.querySelector("#edit-username")?.value || "");
+    clearFieldError("edit-name");
+    clearFieldError("edit-username");
+
+    const displayName = getFieldValue("edit-name").trim();
+    const bioVal = getFieldValue("edit-bio").trim().slice(0, 160);
+    const photoUrlVal = getFieldValue("edit-photo").trim();
+    const usernameVal = normalizeUsername(getFieldValue("edit-username"));
 
     if (!displayName) {
-      showToast("Name is required");
+      setFieldError("edit-name", "Name is required");
       return;
     }
     if (usernameVal && !isValidUsername(usernameVal)) {
-      showToast("Username must be 3–32 characters (a–z, 0–9, _)");
+      setFieldError(
+        "edit-username",
+        "Username must be 3–32 characters (a–z, 0–9, _)"
+      );
       return;
     }
 
     const btn = root.querySelector("#edit-save");
-    const restore = setButtonLoading(btn, "Saving…");
+    const restore = setBtnLoading(btn, "Saving…");
+
     try {
       let photoURL = photoUrlVal || null;
       if (pendingAvatarFile) {
-        showToast("Uploading photo…");
+        showToast("Uploading photo…", { type: "info" });
         photoURL = await uploadAvatar(pendingAvatarFile);
         pendingAvatarFile = null;
       }
+
       await saveProfile({
         displayName,
         bio: bioVal,
         photoURL,
         username: usernameVal || undefined,
       });
-      closeOverlay(editOverlay);
-      showToast("Profile updated");
 
-      const n = getState().profile?.displayName || displayName;
-      const u = getState().profile?.username || usernameVal;
-      const b = getState().profile?.bio || bioVal;
-      const p = getState().profile?.photoURL || photoURL;
-      const nameEl = root.querySelector("#settings-name");
-      const userEl = root.querySelector("#settings-username");
-      const bioEl = root.querySelector("#settings-bio");
-      const av = root.querySelector("#settings-avatar");
-      if (nameEl) nameEl.textContent = n;
-      if (userEl) userEl.textContent = u ? `@${u}` : "—";
-      if (bioEl) {
-        if (b) {
-          bioEl.hidden = false;
-          bioEl.textContent = b;
-        } else {
-          bioEl.hidden = true;
-          bioEl.textContent = "";
-        }
-      }
-      if (av) {
-        av.innerHTML = p
-          ? `<img src="${escapeHtml(p)}" alt="Avatar">`
-          : `<span>${(n[0] || "U").toUpperCase()}</span>`;
-      }
+      closeOverlay(editOverlay);
+      showToast("Profile updated", { type: "success" });
+
+      paintProfileCard(root, {
+        displayName,
+        username: usernameVal,
+        bio: bioVal,
+        photoURL,
+      });
     } catch (e) {
       console.error(e);
-      showToast(e.message || "Update failed");
+      showToast(e.message || "Update failed", { type: "error" });
     } finally {
       restore();
     }
   });
 
+  /* ── General ── */
   root.querySelector("#btn-about")?.addEventListener("click", () => {
-    showToast("Nexus — private modern messaging");
+    showToast("Nexus — private modern messaging", { type: "info" });
   });
   root.querySelector("#btn-data")?.addEventListener("click", () => {
     showToast("Storage management — coming soon");
   });
 
-  /* Logout */
-  root.querySelector("#btn-logout")?.addEventListener("click", () => openOverlay(logoutOverlay));
-  root.querySelector("#logout-cancel")?.addEventListener("click", () => closeOverlay(logoutOverlay));
-  root.querySelector("#logout-confirm")?.addEventListener("click", async () => {
-    const btn = root.querySelector("#logout-confirm");
-    const restore = setButtonLoading(btn, "Logging out…");
+  /* ── Logout (confirmDialog component) ── */
+  root.querySelector("#btn-logout")?.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "Log out?",
+      message: "You will need to sign in again to use Nexus on this device.",
+      confirmLabel: "Log out",
+      cancelLabel: "Cancel",
+      danger: true,
+    });
+    if (!ok) return;
+
     try {
       await signOut();
       try {
@@ -716,12 +867,14 @@ export function renderSettings() {
       } catch (_) {}
       location.href = location.pathname + location.search;
     } catch (_) {
-      showToast("Sign out failed");
-      restore();
+      showToast("Sign out failed", { type: "error" });
     }
   });
 
-  /* Realtime listeners */
+  /* ═══════════════════════════════════════════════════════════
+     REALTIME — userSettings + public profile
+  ═══════════════════════════════════════════════════════════ */
+
   const me = auth.currentUser;
   if (me) {
     unsubSettings = db
@@ -742,28 +895,13 @@ export function renderSettings() {
           if (!snap.exists) return;
           const data = snap.data();
           setState({ profile: data });
-          const nameEl = root.querySelector("#settings-name");
-          const userEl = root.querySelector("#settings-username");
-          const bioEl = root.querySelector("#settings-bio");
-          const av = root.querySelector("#settings-avatar");
-          if (nameEl && data.displayName) nameEl.textContent = data.displayName;
-          if (userEl) userEl.textContent = data.username ? `@${data.username}` : "—";
-          if (bioEl) {
-            if (data.bio) {
-              bioEl.hidden = false;
-              bioEl.textContent = data.bio;
-            } else {
-              bioEl.hidden = true;
-            }
-          }
-          if (av && data.photoURL) {
-            av.innerHTML = `<img src="${escapeHtml(data.photoURL)}" alt="Avatar">`;
-          }
+          paintProfileCard(root, data);
         },
         (err) => console.warn("profile listener:", err)
       );
   }
 
+  /* ── Cleanup ── */
   return () => {
     document.removeEventListener("keydown", onKeyDown);
     if (unsubSettings) {
