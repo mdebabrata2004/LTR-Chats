@@ -2,170 +2,134 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ──────────────────────────────────────────────
-    // Helpers
-    // ──────────────────────────────────────────────
     function isSignedIn() {
       return request.auth != null;
     }
-
     function isOwner(uid) {
       return isSignedIn() && request.auth.uid == uid;
     }
-
-    function isMember(conversationId) {
-      return isSignedIn() &&
-        exists(/databases/$(database)/documents/conversationMembers/$(conversationId)/members/$(request.auth.uid));
+    function isConvMember() {
+      return isSignedIn()
+        && resource.data.keys().hasAny(['members'])
+        && request.auth.uid in resource.data.members;
     }
-
-    function memberRole(conversationId) {
-      return get(/databases/$(database)/documents/conversationMembers/$(conversationId)/members/$(request.auth.uid)).data.role;
+    function isConvMemberOnCreate() {
+      return isSignedIn()
+        && request.resource.data.keys().hasAny(['members'])
+        && request.auth.uid in request.resource.data.members;
     }
-
-    function isGroupAdminOrOwner(conversationId) {
-      return isMember(conversationId) &&
-        memberRole(conversationId) in ['owner', 'admin'];
+    function conversationExists(cid) {
+      return exists(/databases/$(database)/documents/conversations/$(cid));
     }
-
-    function isGroupOwner(conversationId) {
-      return isMember(conversationId) && memberRole(conversationId) == 'owner';
+    function isInConversation(cid) {
+      return isSignedIn()
+        && conversationExists(cid)
+        && request.auth.uid in get(/databases/$(database)/documents/conversations/$(cid)).data.members;
     }
-
-    // Server timestamp helpers for delete-for-everyone
-    function messageAgeMs() {
-      return request.time.toMillis() - resource.data.createdAt.toMillis();
-    }
-
     function withinDeleteWindow() {
-      // 24 hours = 86400000 ms
-      return messageAgeMs() <= 86400000;
+      return resource.data.keys().hasAll(['createdAt'])
+        && request.time.toMillis() - resource.data.createdAt.toMillis() <= 86400000;
+    }
+    function onlyReactionsChanged() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']);
+    }
+    function isValidDeleteForEveryone() {
+      return resource.data.senderId == request.auth.uid
+        && resource.data.get('deleted', false) != true
+        && request.resource.data.deleted == true
+        && request.resource.data.deletedBy == request.auth.uid
+        && withinDeleteWindow();
     }
 
-    // ──────────────────────────────────────────────
-    // users/{uid}  — PUBLIC profile only
-    // ──────────────────────────────────────────────
     match /users/{uid} {
-      allow read: if true; // public fields only; private data lives elsewhere
-      allow create: if isOwner(uid);
-      allow update: if isOwner(uid)
-                    && !request.resource.data.diff(resource.data).affectedKeys()
-                         .hasAny(['email', 'phone', 'createdAt']); // those belong in privateUsers
-      allow delete: if false; // soft-delete via Cloud Function later if needed
+      allow get: if true;
+      allow list: if isSignedIn();
+      allow create, update: if isOwner(uid);
+      allow delete: if false;
     }
 
-    // ──────────────────────────────────────────────
-    // privateUsers/{uid}  — sensitive data
-    // ──────────────────────────────────────────────
     match /privateUsers/{uid} {
       allow read, write: if isOwner(uid);
     }
-
-    // ──────────────────────────────────────────────
-    // userSettings/{uid}
-    // ──────────────────────────────────────────────
     match /userSettings/{uid} {
       allow read, write: if isOwner(uid);
     }
 
-    // ──────────────────────────────────────────────
-    // usernames/{normalizedUsername}  — uniqueness index
-    // ──────────────────────────────────────────────
     match /usernames/{username} {
-      allow read: if true;
-      // Creation must be done via a transaction that also creates the user profile.
-      // Only the owner of the uid can claim a username.
+      allow get: if true;
+      allow list: if isSignedIn();
       allow create: if isSignedIn()
                     && request.resource.data.uid == request.auth.uid
                     && username.matches('^[a-z0-9_]{3,32}$');
-      allow update: if false; // usernames are immutable once claimed
+      allow update: if false;
       allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
     }
 
-    // ──────────────────────────────────────────────
-    // contacts/{uid}/list/{contactId}
-    // ──────────────────────────────────────────────
     match /contacts/{uid}/list/{contactId} {
       allow read, write: if isOwner(uid);
     }
+    match /blocks/{uid}/list/{blockedUid} {
+      allow read, write: if isOwner(uid);
+    }
+    match /devices/{uid}/list/{deviceId} {
+      allow read, write: if isOwner(uid);
+    }
 
-    // ──────────────────────────────────────────────
-    // conversations/{cid}
-    // ──────────────────────────────────────────────
+    // ★ conversations — list uses members[] (NOT conversationMembers exists)
     match /conversations/{cid} {
-      allow read: if isMember(cid);
-      allow create: if isSignedIn();
-      allow update: if isMember(cid);
-      allow delete: if false; // soft-delete / archive only
-    }
-
-    // ──────────────────────────────────────────────
-    // conversationMembers/{cid}/members/{uid}
-    // ──────────────────────────────────────────────
-    match /conversationMembers/{cid}/members/{uid} {
-      allow read: if isMember(cid) || isOwner(uid);
-      allow create: if isSignedIn() && (
-        // Creating own membership (e.g. accepting invite or creating 1:1)
-        request.auth.uid == uid ||
-        // Admin/owner adding someone
-        isGroupAdminOrOwner(cid)
+      allow get: if isSignedIn() && (
+        resource == null ||
+        (resource.data.keys().hasAny(['members'])
+          && request.auth.uid in resource.data.members)
       );
-      allow update: if isOwner(uid) || isGroupAdminOrOwner(cid);
-      allow delete: if isOwner(uid) || isGroupAdminOrOwner(cid) || isGroupOwner(cid);
-    }
-
-    // ──────────────────────────────────────────────
-    // messages/{cid}/messages/{mid}
-    // ──────────────────────────────────────────────
-    match /messages/{cid}/messages/{mid} {
-      allow read: if isMember(cid);
-
-      allow create: if isMember(cid)
-                    && request.resource.data.senderId == request.auth.uid
-                    && request.resource.data.keys().hasAll(['senderId', 'type', 'createdAt']);
-
-      // Update (edit, react, delete-for-everyone state)
-      allow update: if isMember(cid) && (
-        // Sender can update own message (reactions are handled client-side via map merge)
-        resource.data.senderId == request.auth.uid ||
-        // Anyone in the conversation can add a reaction (limited field change)
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
-      );
-
-      // Special rule for delete-for-everyone:
-      // Only the original sender may set deleted=true, and only within 24h of createdAt.
-      // The client must send deleted: true, deletedAt: request.time, deletedBy: uid.
-      // Rules validate the window using server time.
-      allow update: if isMember(cid)
-                    && resource.data.senderId == request.auth.uid
-                    && request.resource.data.deleted == true
-                    && resource.data.deleted != true
-                    && withinDeleteWindow()
-                    && request.resource.data.deletedBy == request.auth.uid;
-
-      // Permanent hard-delete is never allowed from the client
+      allow list: if isConvMember();
+      allow create: if isConvMemberOnCreate()
+                    && request.resource.data.type in ['direct', 'group']
+                    && request.resource.data.members is list
+                    && request.resource.data.members.size() >= 2;
+      allow update: if isConvMember();
       allow delete: if false;
     }
 
-    // ──────────────────────────────────────────────
-    // calls/{callId}  — signaling only
-    // ──────────────────────────────────────────────
-    match /calls/{callId} {
-      allow read, write: if isSignedIn()
-                         && request.auth.uid in resource.data.participants;
-      allow create: if isSignedIn()
-                    && request.auth.uid in request.resource.data.participants;
+    match /conversationMembers/{cid}/members/{uid} {
+      allow read: if isSignedIn() && (
+        request.auth.uid == uid || isInConversation(cid)
+      );
+      allow create: if isSignedIn() && (
+        request.auth.uid == uid || isInConversation(cid)
+      );
+      allow update: if isSignedIn() && (
+        request.auth.uid == uid || isInConversation(cid)
+      );
+      allow delete: if isSignedIn() && request.auth.uid == uid;
     }
 
-    // ──────────────────────────────────────────────
-    // reports/{rid}
-    // ──────────────────────────────────────────────
+    match /messages/{cid}/messages/{mid} {
+      allow read: if isInConversation(cid);
+      allow create: if isInConversation(cid)
+                    && request.resource.data.senderId == request.auth.uid
+                    && request.resource.data.keys().hasAll(['senderId', 'type', 'createdAt']);
+      allow update: if isInConversation(cid) && (
+        onlyReactionsChanged() || isValidDeleteForEveryone()
+      );
+      allow delete: if false;
+    }
+
+    match /calls/{callId} {
+      allow create: if isSignedIn()
+                    && request.resource.data.keys().hasAny(['participants'])
+                    && request.auth.uid in request.resource.data.participants;
+      allow read, update, delete: if isSignedIn()
+                    && resource.data.keys().hasAny(['participants'])
+                    && request.auth.uid in resource.data.participants;
+    }
+
     match /reports/{rid} {
       allow create: if isSignedIn()
                     && request.resource.data.reporterId == request.auth.uid;
-      allow read, update, delete: if false; // admin / Cloud Function only
+      allow read, update, delete: if false;
     }
 
-    // Default deny
     match /{document=**} {
       allow read, write: if false;
     }
