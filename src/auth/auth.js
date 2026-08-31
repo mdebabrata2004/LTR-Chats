@@ -1,12 +1,10 @@
 /**
- * Authentication core — listeners, profile load, email/Google/phone, onboarding, signOut
- *
- * UI should call these functions; pair with auth-ui.js
- * login.js / register.js can re-export thinner wrappers if needed
+ * Authentication core — listeners, profile, email/Google/phone, onboarding, signOut
+ * Pair with auth-ui.js
  */
 
 import { auth, db } from "../config/firebase.js";
-import { setState, getState, resetState } from "../core/state.js";
+import { setState, resetState } from "../core/state.js";
 import { showToast } from "../components/toast.js";
 import {
   normalizeUsername,
@@ -59,7 +57,7 @@ export function initAuthListeners(onChange) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   LOAD PROFILE / SETTINGS INTO STATE
+   LOAD PROFILE / SETTINGS
 ═══════════════════════════════════════════════════════════ */
 
 /**
@@ -108,7 +106,7 @@ export async function loadUserData(uid) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   BOOTSTRAP PRIVATE + SETTINGS (idempotent)
+   PRIVATE + SETTINGS BOOTSTRAP
 ═══════════════════════════════════════════════════════════ */
 
 async function ensurePrivateAndSettings(uid, extra = {}) {
@@ -127,7 +125,6 @@ async function ensurePrivateAndSettings(uid, extra = {}) {
       createdAt: FieldValue.serverTimestamp(),
     });
   } else {
-    // Fill missing contact fields without overwriting
     const patch = {};
     const data = privateSnap.data() || {};
     if (!data.email && extra.email) patch.email = extra.email;
@@ -162,7 +159,7 @@ async function ensurePrivateAndSettings(uid, extra = {}) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   AUTH ERROR MESSAGES
+   ERROR MESSAGES
 ═══════════════════════════════════════════════════════════ */
 
 export function mapAuthError(err) {
@@ -189,6 +186,12 @@ export function mapAuthError(err) {
     "auth/invalid-verification-code": "Invalid verification code",
     "auth/code-expired": "Code expired. Request a new one",
     "auth/captcha-check-failed": "reCAPTCHA failed. Refresh and try again",
+    "auth/invalid-app-credential":
+      "Phone verification failed. Complete the reCAPTCHA and try again.",
+    "auth/invalid-app-verifier":
+      "reCAPTCHA invalid. Close the popup and try again.",
+    "auth/missing-app-credential":
+      "reCAPTCHA missing. Wait for it to load, then send again.",
     "permission-denied": "Permission denied. Check Firestore rules.",
   };
   return map[code] || err?.message || "Something went wrong";
@@ -198,11 +201,6 @@ export function mapAuthError(err) {
    EMAIL
 ═══════════════════════════════════════════════════════════ */
 
-/**
- * @param {string} email
- * @param {string} password
- * @returns {Promise<firebase.User>}
- */
 export async function registerWithEmail(email, password) {
   const e = String(email || "").trim();
   const p = String(password || "");
@@ -221,11 +219,6 @@ export async function registerWithEmail(email, password) {
   }
 }
 
-/**
- * @param {string} email
- * @param {string} password
- * @returns {Promise<firebase.User>}
- */
 export async function loginWithEmail(email, password) {
   const e = String(email || "").trim();
   const p = String(password || "");
@@ -241,9 +234,6 @@ export async function loginWithEmail(email, password) {
   }
 }
 
-/**
- * @param {string} email
- */
 export async function sendPasswordReset(email) {
   const e = String(email || "").trim();
   if (!isValidEmail(e)) throw new Error("Enter a valid email");
@@ -258,12 +248,11 @@ export async function sendPasswordReset(email) {
    GOOGLE
 ═══════════════════════════════════════════════════════════ */
 
-/**
- * @returns {Promise<firebase.User>}
- */
 export async function loginWithGoogle() {
   const provider = new firebase.auth.GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
+  provider.addScope("email");
+  provider.addScope("profile");
 
   try {
     const cred = await auth.signInWithPopup(provider);
@@ -276,11 +265,14 @@ export async function loginWithGoogle() {
       await auth.signInWithRedirect(provider);
       return null;
     }
+    if (err?.code === "auth/popup-closed-by-user") {
+      throw new Error(mapAuthError(err));
+    }
     throw new Error(mapAuthError(err));
   }
 }
 
-/** Call on boot if redirect Google flow is used */
+/** Call once on boot if Google redirect was used */
 export async function completeGoogleRedirect() {
   try {
     const result = await auth.getRedirectResult();
@@ -301,26 +293,75 @@ export async function completeGoogleRedirect() {
    PHONE OTP
 ═══════════════════════════════════════════════════════════ */
 
-/**
- * Invisible reCAPTCHA bound to a button id
- * @param {string} [buttonId="btn-phone-send"]
- */
-export function setupRecaptcha(buttonId = "btn-phone-send") {
-  if (recaptchaVerifier) return recaptchaVerifier;
+let recaptchaReady = false;
 
-  recaptchaVerifier = new firebase.auth.RecaptchaVerifier(buttonId, {
-    size: "invisible",
-    callback: () => {},
-    "expired-callback": () => {
-      showToast("reCAPTCHA expired. Try again.");
-    },
-  });
+export function resetRecaptcha() {
+  recaptchaReady = false;
+  if (recaptchaVerifier) {
+    try {
+      recaptchaVerifier.clear();
+    } catch (_) {}
+    recaptchaVerifier = null;
+  }
+  const el = document.getElementById("recaptcha-container");
+  if (el) el.innerHTML = "";
+}
 
-  return recaptchaVerifier;
+function ensureRecaptchaContainer(containerId) {
+  let el = document.getElementById(containerId);
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = containerId;
+  el.style.cssText =
+    "display:flex;justify-content:center;margin:12px 0;min-height:78px;";
+  document.body.appendChild(el);
+  return el;
 }
 
 /**
- * @param {string} phoneE164 e.g. +8801712345678
+ * Render captcha when modal opens. Resolves when user solves it.
+ * @param {string} [containerId="recaptcha-container"]
+ * @returns {Promise<firebase.auth.RecaptchaVerifier>}
+ */
+export function setupRecaptcha(containerId = "recaptcha-container") {
+  resetRecaptcha();
+  ensureRecaptchaContainer(containerId);
+
+  return new Promise((resolve, reject) => {
+    try {
+      recaptchaVerifier = new firebase.auth.RecaptchaVerifier(containerId, {
+        size: "normal",
+        callback: () => {
+          // User completed captcha — token is valid now
+          recaptchaReady = true;
+          resolve(recaptchaVerifier);
+        },
+        "expired-callback": () => {
+          recaptchaReady = false;
+          showToast("reCAPTCHA expired. Solve it again.");
+          resetRecaptcha();
+        },
+      });
+
+      recaptchaVerifier.render().catch((err) => {
+        console.error("reCAPTCHA render failed:", err);
+        resetRecaptcha();
+        reject(
+          new Error(
+            "Could not load reCAPTCHA. Check network / Authorized domains."
+          )
+        );
+      });
+    } catch (err) {
+      resetRecaptcha();
+      reject(err);
+    }
+  });
+}
+
+/**
+ * Call only AFTER captcha is solved (recaptchaReady === true)
+ * @param {string} phoneE164
  */
 export async function sendPhoneOtp(phoneE164) {
   const phone = String(phoneE164 || "").replace(/[\s-]/g, "");
@@ -328,23 +369,25 @@ export async function sendPhoneOtp(phoneE164) {
     throw new Error("Use international format, e.g. +8801XXXXXXXXX");
   }
 
+  if (!recaptchaVerifier || !recaptchaReady) {
+    throw new Error("Complete the reCAPTCHA checkbox first");
+  }
+
   try {
-    const appVerifier = setupRecaptcha("btn-phone-send");
-    confirmationResult = await auth.signInWithPhoneNumber(phone, appVerifier);
+    confirmationResult = await auth.signInWithPhoneNumber(
+      phone,
+      recaptchaVerifier
+    );
     return true;
   } catch (err) {
-    try {
-      recaptchaVerifier?.clear();
-    } catch (_) {}
-    recaptchaVerifier = null;
-    throw new Error(mapAuthError(err));
+    console.error("sendPhoneOtp:", err?.code, err);
+    resetRecaptcha();
+    const e = new Error(mapAuthError(err));
+    e.code = err?.code || "";
+    throw e;
   }
 }
 
-/**
- * @param {string} code 6-digit
- * @returns {Promise<firebase.User>}
- */
 export async function verifyPhoneOtp(code) {
   const c = String(code || "").trim();
   if (!/^\d{6}$/.test(c)) throw new Error("Enter the 6-digit code");
@@ -352,23 +395,29 @@ export async function verifyPhoneOtp(code) {
 
   try {
     const cred = await confirmationResult.confirm(c);
+    confirmationResult = null;
+    resetRecaptcha();
+
     await ensurePrivateAndSettings(cred.user.uid, {
       phone: cred.user.phoneNumber || null,
+      email: cred.user.email || null,
     });
-    confirmationResult = null;
+    try {
+      await loadUserData(cred.user.uid);
+    } catch (_) {}
+
     return cred.user;
   } catch (err) {
-    throw new Error(mapAuthError(err));
+    const e = new Error(mapAuthError(err));
+    e.code = err?.code || "";
+    throw e;
   }
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ONBOARDING — username claim (transaction)
+   ONBOARDING
 ═══════════════════════════════════════════════════════════ */
 
-/**
- * @param {{ displayName: string, username: string, bio?: string, photoURL?: string|null }} data
- */
 export async function completeOnboarding({
   displayName,
   username,
@@ -400,7 +449,6 @@ export async function completeOnboarding({
         throw new Error("Username is already taken");
       }
 
-      // If user already had another username, delete old claim when possible
       const currentUserSnap = await tx.get(userRef);
       const oldUsername = currentUserSnap.exists
         ? currentUserSnap.data()?.username
@@ -424,7 +472,9 @@ export async function completeOnboarding({
           displayName: name,
           username: normalized,
           photoURL: photoURL || user.photoURL || null,
-          bio: String(bio || "").trim().slice(0, 160),
+          bio: String(bio || "")
+            .trim()
+            .slice(0, 160),
           createdAt: FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp(),
         },
@@ -448,17 +498,14 @@ export async function completeOnboarding({
 
   await loadUserData(user.uid);
 
-  // Notify shell (optional — app.js may export refreshShell)
   try {
     const mod = await import("../core/app.js");
     if (typeof mod.refreshShell === "function") {
       mod.refreshShell();
     }
-  } catch (_) {
-    /* app may not export refreshShell — auth listener still updates UI */
-  }
+  } catch (_) {}
 
-  showToast("Welcome to Nexus");
+  showToast("Welcome to Kothiqo");
   return true;
 }
 
@@ -471,14 +518,8 @@ export async function signOut() {
     await auth.signOut();
   } finally {
     confirmationResult = null;
-    if (recaptchaVerifier) {
-      try {
-        recaptchaVerifier.clear();
-      } catch (_) {}
-      recaptchaVerifier = null;
-    }
+    resetRecaptcha();
 
-    // Full client reset (safer than partial nulling)
     try {
       resetState();
     } catch (_) {
@@ -511,6 +552,7 @@ export default {
   loginWithGoogle,
   completeGoogleRedirect,
   setupRecaptcha,
+  resetRecaptcha,
   sendPhoneOtp,
   verifyPhoneOtp,
   completeOnboarding,
